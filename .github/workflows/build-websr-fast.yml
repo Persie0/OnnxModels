@@ -1,0 +1,98 @@
+name: Build WebSR fast models
+
+on:
+  push:
+    branches:
+      - add-websr-fast-models
+    paths:
+      - .github/workflows/build-websr-fast.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+
+      - name: Install converter dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install numpy onnx onnxruntime
+          python -m pip install torch --index-url https://download.pytorch.org/whl/cpu
+
+      - name: Fetch pinned converter and WebSR weights
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p converter weights output
+          curl -fL "https://raw.githubusercontent.com/rigaya/HWEnc-onnx-models/909fc391b5584702892081adb98f93ea2db16e73/export_websr.py" -o converter/export_websr.py
+          curl -fL "https://raw.githubusercontent.com/rigaya/HWEnc-onnx-models/909fc391b5584702892081adb98f93ea2db16e73/onnx_export_common.py" -o converter/onnx_export_common.py
+          curl -fL "https://raw.githubusercontent.com/sb2702/websr/517fbef96c7d28315cd843ad5d4b10203b0bc8af/weights/anime4k/cnn-2x-s-rl.json" -o weights/cnn-2x-s-rl.json
+          curl -fL "https://raw.githubusercontent.com/sb2702/websr/517fbef96c7d28315cd843ad5d4b10203b0bc8af/weights/anime4k/cnn-2x-m-rl.json" -o weights/cnn-2x-m-rl.json
+
+      - name: Export exact WebSR networks to ONNX
+        run: |
+          cd converter
+          python export_websr.py --json-dir ../weights --output ../output
+
+      - name: Validate models and print integrity metadata
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import os
+          import numpy as np
+          import onnx
+          import onnxruntime as ort
+
+          files = [
+              'output/websr_cnn2x_s_rl.onnx',
+              'output/websr_cnn2x_m_rl.onnx',
+          ]
+          for path in files:
+              model = onnx.load(path)
+              onnx.checker.check_model(model)
+              session = ort.InferenceSession(path, providers=['CPUExecutionProvider'])
+              input_name = session.get_inputs()[0].name
+              sample = np.random.default_rng(7).random((1, 3, 23, 31), dtype=np.float32)
+              out = session.run(None, {input_name: sample})[0]
+              assert out.shape == (1, 3, 46, 62), (path, out.shape)
+              assert np.isfinite(out).all(), path
+              print(f'VALID {path}: {os.path.getsize(path)} bytes, output={out.shape}')
+          PY
+          sha256sum output/websr_cnn2x_s_rl.onnx output/websr_cnn2x_m_rl.onnx
+          wc -c output/websr_cnn2x_s_rl.onnx output/websr_cnn2x_m_rl.onnx
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: websr-fast-models
+          path: |
+            output/websr_cnn2x_s_rl.onnx
+            output/websr_cnn2x_m_rl.onnx
+          if-no-files-found: error
+
+      - name: Publish model files to v1 release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! gh release view v1 --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release create v1 --repo "$GITHUB_REPOSITORY" --title "v1" --notes "ONNX model assets used by Image Enhancer."
+          fi
+          gh release upload v1 \
+            output/websr_cnn2x_s_rl.onnx \
+            output/websr_cnn2x_m_rl.onnx \
+            --clobber \
+            --repo "$GITHUB_REPOSITORY"
