@@ -6,6 +6,9 @@ on:
       - add-websr-fast-models
     paths:
       - .github/workflows/build-websr-fast.yml
+  pull_request:
+    branches:
+      - main
   workflow_dispatch:
 
 permissions:
@@ -83,6 +86,7 @@ jobs:
           if-no-files-found: error
 
       - name: Publish model files to v1 release
+        if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
         env:
           GH_TOKEN: ${{ github.token }}
         shell: bash
